@@ -133,12 +133,6 @@ Each folder entry is stored as a binary plist blob containing:
 
 3. Check that the folder exists and contains image files
 
-### "Your Photos" section is missing entirely
-
-This is a known bug in some versions of macOS Tahoe. Workarounds:
-- Open Photos.app, select an image, and use Share > Set Wallpaper
-- Restart in Safe Mode, then restart normally
-
 ## License
 
 MIT License - See LICENSE file for details.
