@@ -18,6 +18,10 @@ The library automatically detects your macOS version and uses the appropriate me
 
 ## Installation
 
+### Standalone utility
+
+Download from the [releases page](https://github.com/bartreardon/WallpaperFolderManager/releases) as a PKG installer or standalone binary.
+
 ### As a Swift Package Dependency
 
 Add to your `Package.swift`:
