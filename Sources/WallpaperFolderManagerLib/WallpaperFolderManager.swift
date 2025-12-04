@@ -174,22 +174,18 @@ public class WallpaperFolderManager {
     // MARK: - Legacy (Pre-Tahoe) Implementation
     
     private func addFolderLegacy(_ normalizedPath: String) throws {
-        var plist = try loadLegacyPlist()
-        var folders = plist["UserFolderPaths"] as? [String] ?? []
+        var folders = try readLegacyFolders()
         
         if folders.contains(where: { normalizePath($0) == normalizedPath }) {
             throw WallpaperFolderError.folderAlreadyExists(normalizedPath)
         }
         
         folders.append(normalizedPath)
-        plist["UserFolderPaths"] = folders
-        
-        try saveLegacyPlist(plist)
+        try writeLegacyFolders(folders)
     }
     
     private func removeFolderLegacy(_ normalizedPath: String) throws {
-        var plist = try loadLegacyPlist()
-        var folders = plist["UserFolderPaths"] as? [String] ?? []
+        var folders = try readLegacyFolders()
         
         let originalCount = folders.count
         folders.removeAll { normalizePath($0) == normalizedPath }
@@ -198,42 +194,178 @@ public class WallpaperFolderManager {
             throw WallpaperFolderError.folderNotFound(normalizedPath)
         }
         
-        plist["UserFolderPaths"] = folders
-        try saveLegacyPlist(plist)
+        try writeLegacyFolders(folders)
     }
     
     private func listFoldersLegacy() throws -> [WallpaperFolder] {
-        let plist = try loadLegacyPlist()
-        let folders = plist["UserFolderPaths"] as? [String] ?? []
-        
+        let folders = try readLegacyFolders()
         return folders.map { WallpaperFolder(path: $0) }
     }
     
-    private func loadLegacyPlist() throws -> [String: Any] {
-        guard FileManager.default.fileExists(atPath: plistPath) else {
-            return [:]
+    /// Read UserFolderPaths from DSKDesktopPrefPane dictionary
+    private func readLegacyFolders() throws -> [String] {
+        // Use PlistBuddy to read the array directly
+        let plistPath = "~/Library/Preferences/com.apple.systempreferences.plist"
+        let expandedPath = (plistPath as NSString).expandingTildeInPath
+        
+        // First check if the key exists
+        let checkTask = Process()
+        checkTask.executableURL = URL(fileURLWithPath: "/usr/libexec/PlistBuddy")
+        checkTask.arguments = ["-c", "Print :DSKDesktopPrefPane:UserFolderPaths", expandedPath]
+        
+        let pipe = Pipe()
+        checkTask.standardOutput = pipe
+        checkTask.standardError = FileHandle.nullDevice
+        
+        do {
+            try checkTask.run()
+            checkTask.waitUntilExit()
+            
+            guard checkTask.terminationStatus == 0 else {
+                // Key doesn't exist
+                return []
+            }
+            
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: data, encoding: .utf8) else {
+                return []
+            }
+            
+            // Parse PlistBuddy array output
+            // Format:
+            // Array {
+            //     /path/to/folder1
+            //     /path/to/folder2
+            // }
+            return parsePlistBuddyArrayOutput(output)
+        } catch {
+            return []
         }
-        
-        let url = URL(fileURLWithPath: plistPath)
-        let data = try Data(contentsOf: url)
-        
-        guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
-            throw WallpaperFolderError.plistReadError("Could not parse plist as dictionary")
-        }
-        
-        return plist
     }
     
-    private func saveLegacyPlist(_ plist: [String: Any]) throws {
-        let url = URL(fileURLWithPath: plistPath)
+    /// Parse the output of PlistBuddy Print for an array
+    private func parsePlistBuddyArrayOutput(_ output: String) -> [String] {
+        var results: [String] = []
         
-        let data = try PropertyListSerialization.data(
-            fromPropertyList: plist,
-            format: .binary,
-            options: 0
-        )
+        let lines = output.components(separatedBy: .newlines)
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            // Skip "Array {" and "}" lines
+            if trimmed.hasPrefix("Array") || trimmed == "}" || trimmed.isEmpty {
+                continue
+            }
+            
+            // Each path is on its own line, no quotes
+            if !trimmed.isEmpty {
+                results.append(trimmed)
+            }
+        }
         
-        try data.write(to: url)
+        return results
+    }
+    
+    /// Write UserFolderPaths to DSKDesktopPrefPane dictionary
+    private func writeLegacyFolders(_ folders: [String]) throws {
+        // Read existing DSKDesktopPrefPane dict first to preserve other keys
+        var existingDict = readLegacyPrefPaneDict()
+        
+        if folders.isEmpty {
+            existingDict.removeValue(forKey: "UserFolderPaths")
+        } else {
+            existingDict["UserFolderPaths"] = folders
+        }
+        
+        // Write back the entire dictionary
+        // We need to use PlistBuddy or write plist data for nested structures
+        try writeLegacyPrefPaneDict(existingDict)
+    }
+    
+    /// Read the DSKDesktopPrefPane dictionary as a Swift dictionary
+    private func readLegacyPrefPaneDict() -> [String: Any] {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        task.arguments = ["export", "com.apple.systempreferences", "-"]
+        
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        
+        do {
+            try task.run()
+            task.waitUntilExit()
+            
+            guard task.terminationStatus == 0 else {
+                return [:]
+            }
+            
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  let prefPane = plist["DSKDesktopPrefPane"] as? [String: Any] else {
+                return [:]
+            }
+            
+            return prefPane
+        } catch {
+            return [:]
+        }
+    }
+    
+    /// Write the DSKDesktopPrefPane dictionary using PlistBuddy
+    private func writeLegacyPrefPaneDict(_ dict: [String: Any]) throws {
+        let plistPath = "~/Library/Preferences/com.apple.systempreferences.plist"
+        let expandedPath = (plistPath as NSString).expandingTildeInPath
+        
+        // Use PlistBuddy to set the nested dictionary
+        // First, ensure DSKDesktopPrefPane exists
+        let ensureTask = Process()
+        ensureTask.executableURL = URL(fileURLWithPath: "/usr/libexec/PlistBuddy")
+        ensureTask.arguments = ["-c", "Add :DSKDesktopPrefPane dict", expandedPath]
+        ensureTask.standardOutput = FileHandle.nullDevice
+        ensureTask.standardError = FileHandle.nullDevice
+        try? ensureTask.run()
+        ensureTask.waitUntilExit()
+        
+        // Delete existing UserFolderPaths if present
+        let deleteTask = Process()
+        deleteTask.executableURL = URL(fileURLWithPath: "/usr/libexec/PlistBuddy")
+        deleteTask.arguments = ["-c", "Delete :DSKDesktopPrefPane:UserFolderPaths", expandedPath]
+        deleteTask.standardOutput = FileHandle.nullDevice
+        deleteTask.standardError = FileHandle.nullDevice
+        try? deleteTask.run()
+        deleteTask.waitUntilExit()
+        
+        // Add the array if we have folders
+        if let folders = dict["UserFolderPaths"] as? [String], !folders.isEmpty {
+            // Add empty array first
+            let addArrayTask = Process()
+            addArrayTask.executableURL = URL(fileURLWithPath: "/usr/libexec/PlistBuddy")
+            addArrayTask.arguments = ["-c", "Add :DSKDesktopPrefPane:UserFolderPaths array", expandedPath]
+            addArrayTask.standardOutput = FileHandle.nullDevice
+            addArrayTask.standardError = FileHandle.nullDevice
+            try addArrayTask.run()
+            addArrayTask.waitUntilExit()
+            
+            // Add each folder
+            for folder in folders {
+                let addTask = Process()
+                addTask.executableURL = URL(fileURLWithPath: "/usr/libexec/PlistBuddy")
+                addTask.arguments = ["-c", "Add :DSKDesktopPrefPane:UserFolderPaths: string \(folder)", expandedPath]
+                addTask.standardOutput = FileHandle.nullDevice
+                addTask.standardError = FileHandle.nullDevice
+                try addTask.run()
+                addTask.waitUntilExit()
+            }
+        }
+        
+        // Sync preferences
+        let syncTask = Process()
+        syncTask.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        syncTask.arguments = ["cfprefsd"]
+        syncTask.standardOutput = FileHandle.nullDevice
+        syncTask.standardError = FileHandle.nullDevice
+        try? syncTask.run()
+        syncTask.waitUntilExit()
     }
     
     // MARK: - Tahoe+ Implementation
