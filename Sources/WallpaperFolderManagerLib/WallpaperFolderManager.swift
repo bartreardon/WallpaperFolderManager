@@ -358,8 +358,20 @@ public class WallpaperFolderManager {
         
         let url = URL(fileURLWithPath: plistPath)
         let data = try Data(contentsOf: url)
+        
+        // Handle empty file
+        guard !data.isEmpty else {
+            return TahoePlist()
+        }
+        
         let decoder = PropertyListDecoder()
-        return try decoder.decode(TahoePlist.self, from: data)
+        do {
+            return try decoder.decode(TahoePlist.self, from: data)
+        } catch {
+            // If decoding fails (e.g., plist has unexpected structure),
+            // return empty plist rather than failing
+            return TahoePlist()
+        }
     }
     
     private func saveTahoePlist(_ plist: TahoePlist) throws {
@@ -456,6 +468,17 @@ private struct TahoePlist: Codable {
         choiceRequestsImageFolders = []
         choiceRequestsPersonIdentifiers = []
         didPerformPhotosMigration = true
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        // Decode with defaults for missing keys
+        choiceRequestsAssets = try container.decodeIfPresent([Data].self, forKey: .choiceRequestsAssets) ?? []
+        choiceRequestsCollectionIdentifiers = try container.decodeIfPresent([Data].self, forKey: .choiceRequestsCollectionIdentifiers) ?? []
+        choiceRequestsImageFolders = try container.decodeIfPresent([Data].self, forKey: .choiceRequestsImageFolders) ?? []
+        choiceRequestsPersonIdentifiers = try container.decodeIfPresent([Data].self, forKey: .choiceRequestsPersonIdentifiers) ?? []
+        didPerformPhotosMigration = try container.decodeIfPresent(Bool.self, forKey: .didPerformPhotosMigration) ?? true
     }
 }
 

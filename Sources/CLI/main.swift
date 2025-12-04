@@ -22,7 +22,7 @@ struct WallpaperFolderCLI: ParsableCommand {
             
             Folders appear in System Settings > Wallpaper as an additional photo set.
             """,
-        version: "1.0.0",
+        version: "1.0.1",
         subcommands: [Add.self, Remove.self, List.self]
     )
 }
