@@ -20,7 +20,16 @@ The library automatically detects your macOS version and uses the appropriate me
 
 ### Standalone utility
 
+#### PKG Installer
+
 Download from the [releases page](https://github.com/bartreardon/WallpaperFolderManager/releases) as a PKG installer or standalone binary.
+
+#### Homebrew
+
+```
+brew tap bartreardon/cask
+brew install --cask wallpaper-folder
+```
 
 ### As a Swift Package Dependency
 
