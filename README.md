@@ -27,7 +27,7 @@ Download from the [releases page](https://github.com/bartreardon/WallpaperFolder
 #### Homebrew
 
 ```
-brew tap bartreardon/cask
+brew tap bartreardon/tap
 brew install --cask wallpaper-folder
 ```
 
