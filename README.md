@@ -67,6 +67,32 @@ wallpaper-folder --help
 wallpaper-folder add --help
 ```
 
+### Managing "Your Photos" (macOS 26 / Tahoe and later)
+
+In addition to folders, the System Settings > Wallpaper "Your Photos" area can hold
+individual images and Photos-library sources.
+
+```bash
+# List individual images registered in "Your Photos"
+wallpaper-folder list-photos
+
+# Add a single image to "Your Photos"
+wallpaper-folder add-photo ~/Pictures/example.jpg
+
+# Remove a single image
+wallpaper-folder remove-photo ~/Pictures/example.jpg
+
+# Clear "Your Photos" — removes individual images and Photos albums/people,
+# but leaves any folders added with `add` in place
+wallpaper-folder reset-photos
+
+# Clear everything, including custom folders
+wallpaper-folder reset-photos --include-folders
+```
+
+> **Note:** The wallpaper currently applied to the desktop is stored separately from this
+> list, so it won't disappear until the user switches to a different wallpaper.
+
 ## Library Usage
 
 ```swift
@@ -96,7 +122,23 @@ do {
     
     // Remove a folder
     try manager.removeFolderAndApply("/path/to/folder")
-    
+
+    // --- "Your Photos" individual images (macOS 26 / Tahoe and later) ---
+
+    // Add or remove a single image
+    try manager.addPhotoAndApply("/path/to/image.jpg")
+    try manager.removePhotoAndApply("/path/to/image.jpg")
+
+    // List individual images
+    let photos = try manager.listPhotos()
+
+    // Inspect what's populating "Your Photos"
+    let contents = try manager.yourPhotosContents()
+    print("\(contents.imageFiles) images, \(contents.imageFolders) folders, \(contents.total) total")
+
+    // Clear "Your Photos" (keeps folders unless includeFolders: true)
+    try manager.resetYourPhotosAndApply()
+
 } catch {
     print("Error: \(error.localizedDescription)")
 }
@@ -124,6 +166,14 @@ Each folder entry is stored as a binary plist blob containing:
 
 **Important**: The keys must be in a specific order in the binary plist. This library handles that automatically using `PropertyListSerialization` with `NSMutableDictionary`.
 
+The "Your Photos" area is the union of several arrays in the same plist:
+
+- `ChoiceRequests.ImageFolders` — custom folders (managed by `add`/`remove`)
+- `ChoiceRequests.ImageFiles` — individual images (managed by `add-photo`/`remove-photo`)
+- `ChoiceRequests.Assets` / `ChoiceRequests.CollectionIdentifiers` / `ChoiceRequests.PersonIdentifiers` — Photos-library assets, albums, and people
+
+Each `ImageFiles` entry mirrors a folder entry but uses `copyURL` (instead of `cloneURL`) and `originatingBundleIdentifier` / `originatingBundleName` (instead of `id`). The library preserves all of these arrays and the `DidPerform*Migration` flags on every write, so managing one source never disturbs the others.
+
 ## Troubleshooting
 
 ### Folder doesn't appear in System Settings
@@ -136,6 +186,16 @@ Each folder entry is stored as a binary plist blob containing:
 2. Try closing and reopening System Settings
 
 3. Check that the folder exists and contains image files
+
+### "Your Photos" images won't delete
+
+On macOS Tahoe, the **X** and right-click **Remove** buttons in the "Your Photos" panel
+often don't actually remove anything. Use `wallpaper-folder reset-photos` (or `remove-photo`
+for a single image) to clear them, then reopen System Settings.
+
+If an image still won't go away, it's almost certainly the wallpaper **currently applied**
+to your desktop — that's stored separately from the picker list. Switch to a different
+background first, then run the command again.
 
 ## License
 

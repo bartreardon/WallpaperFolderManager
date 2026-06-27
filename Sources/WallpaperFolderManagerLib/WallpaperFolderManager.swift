@@ -34,28 +34,40 @@ public struct WallpaperFolder {
 public enum WallpaperFolderError: Error, LocalizedError {
     case couldNotGetCacheDirectory
     case notADirectory(String)
+    case notAFile(String)
     case folderAlreadyExists(String)
     case folderNotFound(String)
+    case photoAlreadyExists(String)
+    case photoNotFound(String)
     case plistEncodingError(String)
     case plistReadError(String)
     case bookmarkCreationFailed(String)
-    
+    case notSupportedOnThisOS(String)
+
     public var errorDescription: String? {
         switch self {
         case .couldNotGetCacheDirectory:
             return "Could not determine user cache directory"
         case .notADirectory(let path):
             return "'\(path)' is not a valid directory"
+        case .notAFile(let path):
+            return "'\(path)' is not a valid file"
         case .folderAlreadyExists(let path):
             return "Folder '\(path)' is already registered"
         case .folderNotFound(let path):
             return "Folder '\(path)' not found in registered folders"
+        case .photoAlreadyExists(let path):
+            return "Photo '\(path)' is already in Your Photos"
+        case .photoNotFound(let path):
+            return "Photo '\(path)' not found in Your Photos"
         case .plistEncodingError(let details):
             return "Failed to encode plist: \(details)"
         case .plistReadError(let details):
             return "Failed to read plist: \(details)"
         case .bookmarkCreationFailed(let details):
             return "Failed to create bookmark: \(details)"
+        case .notSupportedOnThisOS(let details):
+            return details
         }
     }
 }
@@ -147,6 +159,142 @@ public class WallpaperFolderManager {
         return folders.contains { normalizePath($0.path) == normalizedPath }
     }
     
+    // MARK: - "Your Photos" individual images (Tahoe+)
+
+    /// Add a single image file to the "Your Photos" area.
+    /// Only supported on macOS Tahoe (26) and later.
+    public func addPhoto(_ imagePath: String) throws {
+        guard isTahoeOrLater else {
+            throw WallpaperFolderError.notSupportedOnThisOS("Adding individual photos requires macOS 26 (Tahoe) or later")
+        }
+
+        let normalizedPath = normalizePath(imagePath)
+
+        // Validate the file exists and is a regular file (not a directory)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalizedPath, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            throw WallpaperFolderError.notAFile(imagePath)
+        }
+
+        var plist = try loadTahoePlist()
+
+        if try photoExistsTahoe(normalizedPath, in: plist) {
+            throw WallpaperFolderError.photoAlreadyExists(normalizedPath)
+        }
+
+        let entryData = try createTahoePhotoEntry(for: normalizedPath)
+        plist.choiceRequestsImageFiles.append(entryData)
+
+        try saveTahoePlist(plist)
+    }
+
+    /// Remove a single image file from the "Your Photos" area.
+    public func removePhoto(_ imagePath: String) throws {
+        guard isTahoeOrLater else {
+            throw WallpaperFolderError.notSupportedOnThisOS("Managing individual photos requires macOS 26 (Tahoe) or later")
+        }
+
+        let normalizedPath = normalizePath(imagePath)
+        var plist = try loadTahoePlist()
+
+        let originalCount = plist.choiceRequestsImageFiles.count
+        plist.choiceRequestsImageFiles.removeAll { entryData in
+            guard let path = pathFromEntryData(entryData) else { return false }
+            return normalizePath(path) == normalizedPath
+        }
+
+        guard plist.choiceRequestsImageFiles.count < originalCount else {
+            throw WallpaperFolderError.photoNotFound(normalizedPath)
+        }
+
+        try saveTahoePlist(plist)
+    }
+
+    /// List the individual image files registered in "Your Photos".
+    public func listPhotos() throws -> [WallpaperFolder] {
+        guard isTahoeOrLater else { return [] }
+        let plist = try loadTahoePlist()
+        return plist.choiceRequestsImageFiles.compactMap { entryData in
+            guard let path = pathFromEntryData(entryData) else { return nil }
+            return WallpaperFolder(path: path)
+        }
+    }
+
+    /// Counts of each kind of source that contributes to the "Your Photos" area.
+    public struct YourPhotosContents {
+        public let imageFiles: Int
+        public let imageFolders: Int
+        public let assets: Int
+        public let collections: Int
+        public let people: Int
+
+        public var total: Int { imageFiles + imageFolders + assets + collections + people }
+    }
+
+    /// Inspect what is currently populating the "Your Photos" area.
+    public func yourPhotosContents() throws -> YourPhotosContents {
+        let plist = try loadTahoePlist()
+        return YourPhotosContents(
+            imageFiles: plist.choiceRequestsImageFiles.count,
+            imageFolders: plist.choiceRequestsImageFolders.count,
+            assets: plist.choiceRequestsAssets.count,
+            collections: plist.choiceRequestsCollectionIdentifiers.count,
+            people: plist.choiceRequestsPersonIdentifiers.count
+        )
+    }
+
+    /// Clear the "Your Photos" area. By default this clears individual images plus
+    /// Photos-library sources (assets, albums, people). Pass `includeFolders: true`
+    /// to also remove custom folders added with `addFolder`.
+    /// Returns the contents that were present before clearing.
+    @discardableResult
+    public func resetYourPhotos(includeFolders: Bool = false) throws -> YourPhotosContents {
+        guard isTahoeOrLater else {
+            throw WallpaperFolderError.notSupportedOnThisOS("Resetting 'Your Photos' requires macOS 26 (Tahoe) or later")
+        }
+
+        var plist = try loadTahoePlist()
+        let before = YourPhotosContents(
+            imageFiles: plist.choiceRequestsImageFiles.count,
+            imageFolders: plist.choiceRequestsImageFolders.count,
+            assets: plist.choiceRequestsAssets.count,
+            collections: plist.choiceRequestsCollectionIdentifiers.count,
+            people: plist.choiceRequestsPersonIdentifiers.count
+        )
+
+        plist.choiceRequestsImageFiles = []
+        plist.choiceRequestsAssets = []
+        plist.choiceRequestsCollectionIdentifiers = []
+        plist.choiceRequestsPersonIdentifiers = []
+        if includeFolders {
+            plist.choiceRequestsImageFolders = []
+        }
+
+        try saveTahoePlist(plist)
+        return before
+    }
+
+    /// Add a photo and restart services in one call
+    public func addPhotoAndApply(_ imagePath: String) throws {
+        try addPhoto(imagePath)
+        restartServices()
+    }
+
+    /// Remove a photo and restart services in one call
+    public func removePhotoAndApply(_ imagePath: String) throws {
+        try removePhoto(imagePath)
+        restartServices()
+    }
+
+    /// Reset "Your Photos" and restart services in one call
+    @discardableResult
+    public func resetYourPhotosAndApply(includeFolders: Bool = false) throws -> YourPhotosContents {
+        let before = try resetYourPhotos(includeFolders: includeFolders)
+        restartServices()
+        return before
+    }
+
     /// Restart wallpaper-related services to apply changes
     public func restartServices() {
         if isTahoeOrLater {
@@ -483,6 +631,74 @@ public class WallpaperFolderManager {
         }
     }
     
+    private func photoExistsTahoe(_ normalizedPath: String, in plist: TahoePlist) throws -> Bool {
+        for entryData in plist.choiceRequestsImageFiles {
+            if let path = pathFromEntryData(entryData),
+               normalizePath(path) == normalizedPath {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func createTahoePhotoEntry(for filePath: String) throws -> Data {
+        guard let cacheBasePath = cacheBasePath else {
+            throw WallpaperFolderError.couldNotGetCacheDirectory
+        }
+
+        let copyID = UUID().uuidString.uppercased()
+
+        let fileURL = URL(fileURLWithPath: filePath)
+        let originalURLString = fileURL.absoluteString
+        // The wallpaper agent copies the chosen image into its cache; mirror the
+        // per-item cache layout used for folders (cloneURL) but point at the file.
+        let encodedName = fileURL.lastPathComponent
+            .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? fileURL.lastPathComponent
+        let copyURLString = "file://\(cacheBasePath)com.apple.wallpaper.extension.image/\(copyID)/\(encodedName)"
+
+        let bookmarkData: Data
+        do {
+            bookmarkData = try fileURL.bookmarkData(
+                options: [.minimalBookmark],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        } catch {
+            throw WallpaperFolderError.bookmarkCreationFailed(error.localizedDescription)
+        }
+
+        // Mirrors the structure macOS writes for images dragged into "Your Photos":
+        // dateAdded, originalURL, originalURLBookmarkData, copyURL, originatingBundle*
+        let orderedDict = NSMutableDictionary()
+        orderedDict["dateAdded"] = Date()
+        orderedDict["originalURL"] = ["relative": originalURLString]
+        orderedDict["originalURLBookmarkData"] = bookmarkData
+        orderedDict["copyURL"] = ["relative": copyURLString]
+        orderedDict["originatingBundleIdentifier"] = "com.github.bartreardon.WallpaperFolderManager"
+        orderedDict["originatingBundleName"] = "WallpaperFolderManager"
+
+        do {
+            return try PropertyListSerialization.data(
+                fromPropertyList: orderedDict,
+                format: .binary,
+                options: 0
+            )
+        } catch {
+            throw WallpaperFolderError.plistEncodingError(error.localizedDescription)
+        }
+    }
+
+    /// Extract the originalURL path from any entry blob (folder or image file).
+    private func pathFromEntryData(_ data: Data) -> String? {
+        guard let entry = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let original = entry["originalURL"] as? [String: Any],
+              let relative = original["relative"] as? String,
+              let url = URL(string: relative) else {
+            return nil
+        }
+        return url.path.removingPercentEncoding ?? url.path
+    }
+
     private func loadTahoePlist() throws -> TahoePlist {
         guard FileManager.default.fileExists(atPath: plistPath) else {
             return TahoePlist()
@@ -582,34 +798,46 @@ public class WallpaperFolderManager {
 private struct TahoePlist: Codable {
     var choiceRequestsAssets: [Data]
     var choiceRequestsCollectionIdentifiers: [Data]
+    var choiceRequestsImageFiles: [Data]
     var choiceRequestsImageFolders: [Data]
     var choiceRequestsPersonIdentifiers: [Data]
+    var didPerformImagesContainerMigration: Bool
+    var didPerformPhotosContainerMigration: Bool
     var didPerformPhotosMigration: Bool
-    
+
     enum CodingKeys: String, CodingKey {
         case choiceRequestsAssets = "ChoiceRequests.Assets"
         case choiceRequestsCollectionIdentifiers = "ChoiceRequests.CollectionIdentifiers"
+        case choiceRequestsImageFiles = "ChoiceRequests.ImageFiles"
         case choiceRequestsImageFolders = "ChoiceRequests.ImageFolders"
         case choiceRequestsPersonIdentifiers = "ChoiceRequests.PersonIdentifiers"
+        case didPerformImagesContainerMigration = "DidPerformImagesContainerMigration"
+        case didPerformPhotosContainerMigration = "DidPerformPhotosContainerMigration"
         case didPerformPhotosMigration = "DidPerformPhotosMigration"
     }
-    
+
     init() {
         choiceRequestsAssets = []
         choiceRequestsCollectionIdentifiers = []
+        choiceRequestsImageFiles = []
         choiceRequestsImageFolders = []
         choiceRequestsPersonIdentifiers = []
+        didPerformImagesContainerMigration = true
+        didPerformPhotosContainerMigration = true
         didPerformPhotosMigration = true
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        
+
         // Decode with defaults for missing keys
         choiceRequestsAssets = try container.decodeIfPresent([Data].self, forKey: .choiceRequestsAssets) ?? []
         choiceRequestsCollectionIdentifiers = try container.decodeIfPresent([Data].self, forKey: .choiceRequestsCollectionIdentifiers) ?? []
+        choiceRequestsImageFiles = try container.decodeIfPresent([Data].self, forKey: .choiceRequestsImageFiles) ?? []
         choiceRequestsImageFolders = try container.decodeIfPresent([Data].self, forKey: .choiceRequestsImageFolders) ?? []
         choiceRequestsPersonIdentifiers = try container.decodeIfPresent([Data].self, forKey: .choiceRequestsPersonIdentifiers) ?? []
+        didPerformImagesContainerMigration = try container.decodeIfPresent(Bool.self, forKey: .didPerformImagesContainerMigration) ?? true
+        didPerformPhotosContainerMigration = try container.decodeIfPresent(Bool.self, forKey: .didPerformPhotosContainerMigration) ?? true
         didPerformPhotosMigration = try container.decodeIfPresent(Bool.self, forKey: .didPerformPhotosMigration) ?? true
     }
 }
